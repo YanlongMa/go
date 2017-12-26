@@ -1431,9 +1431,7 @@ func Append(slice, data []byte) []byte {
         slice = newSlice
     }
     slice = slice[0:l+len(data)]
-    for i, c := range data {
-        slice[l+i] = c
-    }
+    copy(slice[l:], data)
     return slice
 }
 </pre>
@@ -2792,7 +2790,7 @@ job := &amp;Job{command, log.New(os.Stderr, "Job: ", log.Ldate)}
 <p>
 If we need to refer to an embedded field directly, the type name of the field,
 ignoring the package qualifier, serves as a field name, as it did
-in the <code>Read</code> method of our <code>ReaderWriter</code> struct.
+in the <code>Read</code> method of our <code>ReadWriter</code> struct.
 Here, if we needed to access the
 <code>*log.Logger</code> of a <code>Job</code> variable <code>job</code>,
 we would write <code>job.Logger</code>,

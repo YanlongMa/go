@@ -166,7 +166,6 @@ func bmap(t *types.Type) *types.Type {
 
 	// link up fields
 	bucket.SetNoalg(true)
-	bucket.SetLocal(t.Local())
 	bucket.SetFields(field[:])
 	dowidth(bucket)
 
@@ -253,8 +252,8 @@ func hmap(t *types.Type) *types.Type {
 		makefield("flags", types.Types[TUINT8]),
 		makefield("B", types.Types[TUINT8]),
 		makefield("noverflow", types.Types[TUINT16]),
-		makefield("hash0", types.Types[TUINT32]),
-		makefield("buckets", types.NewPtr(bmap)), // Used in walk.go for makemap.
+		makefield("hash0", types.Types[TUINT32]), // Used in walk.go for OMAKEMAP.
+		makefield("buckets", types.NewPtr(bmap)), // Used in walk.go for OMAKEMAP.
 		makefield("oldbuckets", types.NewPtr(bmap)),
 		makefield("nevacuate", types.Types[TUINTPTR]),
 		makefield("extra", types.Types[TUNSAFEPTR]),
@@ -262,7 +261,6 @@ func hmap(t *types.Type) *types.Type {
 
 	hmap := types.New(TSTRUCT)
 	hmap.SetNoalg(true)
-	hmap.SetLocal(t.Local())
 	hmap.SetFields(fields)
 	dowidth(hmap)
 
@@ -440,18 +438,18 @@ func methods(t *types.Type) []*Sig {
 		if !sig.isym.Siggen() {
 			sig.isym.SetSiggen(true)
 			if !eqtype(this, it) || this.Width < int64(Widthptr) {
-				compiling_wrappers = 1
-				genwrapper(it, f, sig.isym, 1)
-				compiling_wrappers = 0
+				compiling_wrappers = true
+				genwrapper(it, f, sig.isym, true)
+				compiling_wrappers = false
 			}
 		}
 
 		if !sig.tsym.Siggen() {
 			sig.tsym.SetSiggen(true)
 			if !eqtype(this, t) {
-				compiling_wrappers = 1
-				genwrapper(t, f, sig.tsym, 0)
-				compiling_wrappers = 0
+				compiling_wrappers = true
+				genwrapper(t, f, sig.tsym, false)
+				compiling_wrappers = false
 			}
 		}
 	}
@@ -502,7 +500,7 @@ func imethods(t *types.Type) []*Sig {
 		isym := methodsym(method, t, false)
 		if !isym.Siggen() {
 			isym.SetSiggen(true)
-			genwrapper(t, f, isym, 0)
+			genwrapper(t, f, isym, false)
 		}
 	}
 
@@ -726,7 +724,7 @@ func dextratypeData(lsym *obj.LSym, ot int, t *types.Type) int {
 		nsym := dname(a.name, "", pkg, exported)
 
 		ot = dsymptrOff(lsym, ot, nsym, 0)
-		ot = dmethodptrOff(lsym, ot, dtypesym(a.mtype).Linksym())
+		ot = dmethodptrOff(lsym, ot, dtypesym(a.mtype))
 		ot = dmethodptrOff(lsym, ot, a.isym.Linksym())
 		ot = dmethodptrOff(lsym, ot, a.tsym.Linksym())
 	}
@@ -865,7 +863,7 @@ func dcommontype(lsym *obj.LSym, ot int, t *types.Type) int {
 		if t.Sym != nil || methods(tptr) != nil {
 			sptrWeak = false
 		}
-		sptr = dtypesym(tptr).Linksym()
+		sptr = dtypesym(tptr)
 	}
 
 	gcsym, useGCProg, ptrdata := dgcsym(t)
@@ -962,10 +960,17 @@ func dcommontype(lsym *obj.LSym, ot int, t *types.Type) int {
 	return ot
 }
 
+// typeHasNoAlg returns whether t does not have any associated hash/eq
+// algorithms because t, or some component of t, is marked Noalg.
+func typeHasNoAlg(t *types.Type) bool {
+	a, bad := algtype1(t)
+	return a == ANOEQ && bad.Noalg()
+}
+
 func typesymname(t *types.Type) string {
 	name := t.ShortString()
 	// Use a separate symbol name for Noalg types for #17752.
-	if a, bad := algtype1(t); a == ANOEQ && bad.Noalg() {
+	if typeHasNoAlg(t) {
 		name = "noalg." + name
 	}
 	return name
@@ -1140,15 +1145,16 @@ func formalType(t *types.Type) *types.Type {
 	return t
 }
 
-func dtypesym(t *types.Type) *types.Sym {
+func dtypesym(t *types.Type) *obj.LSym {
 	t = formalType(t)
 	if t.IsUntyped() {
 		Fatalf("dtypesym %v", t)
 	}
 
 	s := typesym(t)
+	lsym := s.Linksym()
 	if s.Siggen() {
-		return s
+		return lsym
 	}
 	s.SetSiggen(true)
 
@@ -1165,21 +1171,18 @@ func dtypesym(t *types.Type) *types.Sym {
 		dupok = obj.DUPOK
 	}
 
-	if myimportpath == "runtime" && (tbase == types.Types[tbase.Etype] || tbase == types.Bytetype || tbase == types.Runetype || tbase == types.Errortype) { // int, float, etc
-		goto ok
+	if myimportpath != "runtime" || (tbase != types.Types[tbase.Etype] && tbase != types.Bytetype && tbase != types.Runetype && tbase != types.Errortype) { // int, float, etc
+		// named types from other files are defined only by those files
+		if tbase.Sym != nil && tbase.Sym.Pkg != localpkg {
+			return lsym
+		}
+		// TODO(mdempsky): Investigate whether this can happen.
+		if isforw[tbase.Etype] {
+			return lsym
+		}
 	}
 
-	// named types from other files are defined only by those files
-	if tbase.Sym != nil && !tbase.Local() {
-		return s
-	}
-	if isforw[tbase.Etype] {
-		return s
-	}
-
-ok:
 	ot := 0
-	lsym := s.Linksym()
 	switch t.Etype {
 	default:
 		ot = dcommontype(lsym, ot, t)
@@ -1191,8 +1194,8 @@ ok:
 		t2 := types.NewSlice(t.Elem())
 		s2 := dtypesym(t2)
 		ot = dcommontype(lsym, ot, t)
-		ot = dsymptr(lsym, ot, s1.Linksym(), 0)
-		ot = dsymptr(lsym, ot, s2.Linksym(), 0)
+		ot = dsymptr(lsym, ot, s1, 0)
+		ot = dsymptr(lsym, ot, s2, 0)
 		ot = duintptr(lsym, ot, uint64(t.NumElem()))
 		ot = dextratype(lsym, ot, t, 0)
 
@@ -1200,14 +1203,14 @@ ok:
 		// ../../../../runtime/type.go:/sliceType
 		s1 := dtypesym(t.Elem())
 		ot = dcommontype(lsym, ot, t)
-		ot = dsymptr(lsym, ot, s1.Linksym(), 0)
+		ot = dsymptr(lsym, ot, s1, 0)
 		ot = dextratype(lsym, ot, t, 0)
 
 	case TCHAN:
 		// ../../../../runtime/type.go:/chanType
 		s1 := dtypesym(t.Elem())
 		ot = dcommontype(lsym, ot, t)
-		ot = dsymptr(lsym, ot, s1.Linksym(), 0)
+		ot = dsymptr(lsym, ot, s1, 0)
 		ot = duintptr(lsym, ot, uint64(t.ChanDir()))
 		ot = dextratype(lsym, ot, t, 0)
 
@@ -1241,13 +1244,13 @@ ok:
 
 		// Array of rtype pointers follows funcType.
 		for _, t1 := range t.Recvs().Fields().Slice() {
-			ot = dsymptr(lsym, ot, dtypesym(t1.Type).Linksym(), 0)
+			ot = dsymptr(lsym, ot, dtypesym(t1.Type), 0)
 		}
 		for _, t1 := range t.Params().Fields().Slice() {
-			ot = dsymptr(lsym, ot, dtypesym(t1.Type).Linksym(), 0)
+			ot = dsymptr(lsym, ot, dtypesym(t1.Type), 0)
 		}
 		for _, t1 := range t.Results().Fields().Slice() {
-			ot = dsymptr(lsym, ot, dtypesym(t1.Type).Linksym(), 0)
+			ot = dsymptr(lsym, ot, dtypesym(t1.Type), 0)
 		}
 
 	case TINTER:
@@ -1282,7 +1285,7 @@ ok:
 			nsym := dname(a.name, "", pkg, exported)
 
 			ot = dsymptrOff(lsym, ot, nsym, 0)
-			ot = dsymptrOff(lsym, ot, dtypesym(a.type_).Linksym(), 0)
+			ot = dsymptrOff(lsym, ot, dtypesym(a.type_), 0)
 		}
 
 	// ../../../../runtime/type.go:/mapType
@@ -1292,10 +1295,10 @@ ok:
 		s3 := dtypesym(bmap(t))
 		s4 := dtypesym(hmap(t))
 		ot = dcommontype(lsym, ot, t)
-		ot = dsymptr(lsym, ot, s1.Linksym(), 0)
-		ot = dsymptr(lsym, ot, s2.Linksym(), 0)
-		ot = dsymptr(lsym, ot, s3.Linksym(), 0)
-		ot = dsymptr(lsym, ot, s4.Linksym(), 0)
+		ot = dsymptr(lsym, ot, s1, 0)
+		ot = dsymptr(lsym, ot, s2, 0)
+		ot = dsymptr(lsym, ot, s3, 0)
+		ot = dsymptr(lsym, ot, s4, 0)
 		if t.Key().Width > MAXKEYSIZE {
 			ot = duint8(lsym, ot, uint8(Widthptr))
 			ot = duint8(lsym, ot, 1) // indirect
@@ -1330,17 +1333,15 @@ ok:
 		s1 := dtypesym(t.Elem())
 
 		ot = dcommontype(lsym, ot, t)
-		ot = dsymptr(lsym, ot, s1.Linksym(), 0)
+		ot = dsymptr(lsym, ot, s1, 0)
 		ot = dextratype(lsym, ot, t, 0)
 
 	// ../../../../runtime/type.go:/structType
 	// for security, only the exported fields.
 	case TSTRUCT:
-		n := 0
-
-		for _, t1 := range t.Fields().Slice() {
+		fields := t.Fields().Slice()
+		for _, t1 := range fields {
 			dtypesym(t1.Type)
-			n++
 		}
 
 		// All non-exported struct field names within a struct
@@ -1349,7 +1350,7 @@ ok:
 		// struct type descriptor, we can omit that
 		// information from the field descriptors.
 		var spkg *types.Pkg
-		for _, f := range t.Fields().Slice() {
+		for _, f := range fields {
 			if !exportname(f.Sym.Name) {
 				spkg = f.Sym.Pkg
 				break
@@ -1359,16 +1360,16 @@ ok:
 		ot = dcommontype(lsym, ot, t)
 		ot = dgopkgpath(lsym, ot, spkg)
 		ot = dsymptr(lsym, ot, lsym, ot+3*Widthptr+uncommonSize(t))
-		ot = duintptr(lsym, ot, uint64(n))
-		ot = duintptr(lsym, ot, uint64(n))
+		ot = duintptr(lsym, ot, uint64(len(fields)))
+		ot = duintptr(lsym, ot, uint64(len(fields)))
 
-		dataAdd := n * structfieldSize()
+		dataAdd := len(fields) * structfieldSize()
 		ot = dextratype(lsym, ot, t, dataAdd)
 
-		for _, f := range t.Fields().Slice() {
+		for _, f := range fields {
 			// ../../../../runtime/type.go:/structField
 			ot = dnameField(lsym, ot, spkg, f)
-			ot = dsymptr(lsym, ot, dtypesym(f.Type).Linksym(), 0)
+			ot = dsymptr(lsym, ot, dtypesym(f.Type), 0)
 			offsetAnon := uint64(f.Offset) << 1
 			if offsetAnon>>1 != uint64(f.Offset) {
 				Fatalf("%v: bad field offset for %s", t, f.Sym.Name)
@@ -1400,9 +1401,13 @@ ok:
 			keep = true
 		}
 	}
+	// Do not put Noalg types in typelinks.  See issue #22605.
+	if typeHasNoAlg(t) {
+		keep = false
+	}
 	lsym.Set(obj.AttrMakeTypelink, keep)
 
-	return s
+	return lsym
 }
 
 // for each itabEntry, gather the methods on
@@ -1522,8 +1527,8 @@ func dumptabs() {
 		//   _      [4]byte
 		//   fun    [1]uintptr // variable sized
 		// }
-		o := dsymptr(i.lsym, 0, dtypesym(i.itype).Linksym(), 0)
-		o = dsymptr(i.lsym, o, dtypesym(i.t).Linksym(), 0)
+		o := dsymptr(i.lsym, 0, dtypesym(i.itype), 0)
+		o = dsymptr(i.lsym, o, dtypesym(i.t), 0)
 		o = duint32(i.lsym, o, typehash(i.t)) // copy of type hash
 		o += 4                                // skip unused field
 		for _, fn := range genfun(i.t, i.itype) {
@@ -1549,7 +1554,7 @@ func dumptabs() {
 			// }
 			nsym := dname(p.s.Name, "", nil, true)
 			ot = dsymptrOff(s, ot, nsym, 0)
-			ot = dsymptrOff(s, ot, dtypesym(p.t).Linksym(), 0)
+			ot = dsymptrOff(s, ot, dtypesym(p.t), 0)
 		}
 		ggloblsym(s, int32(ot), int16(obj.RODATA))
 
@@ -1774,8 +1779,7 @@ func fillptrmask(t *types.Type, ptrmask []byte) {
 	}
 
 	vec := bvalloc(8 * int32(len(ptrmask)))
-	xoffset := int64(0)
-	onebitwalktype1(t, &xoffset, vec)
+	onebitwalktype1(t, 0, vec)
 
 	nptr := typeptrdata(t) / int64(Widthptr)
 	for i := int64(0); i < nptr; i++ {

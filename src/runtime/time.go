@@ -163,6 +163,15 @@ func (tb *timersBucket) addtimerLocked(t *timer) {
 // Delete timer t from the heap.
 // Do not need to update the timerproc: if it wakes up early, no big deal.
 func deltimer(t *timer) bool {
+	if t.tb == nil {
+		// t.tb can be nil if the user created a timer
+		// directly, without invoking startTimer e.g
+		//    time.Ticker{C: c}
+		// In this case, return early without any deletion.
+		// See Issue 21874.
+		return false
+	}
+
 	tb := t.tb
 
 	lock(&tb.lock)
@@ -386,4 +395,10 @@ func time_runtimeNano() int64 {
 	return nanotime()
 }
 
-var startNano int64 = nanotime()
+// Monotonic times are reported as offsets from startNano.
+// We initialize startNano to nanotime() - 1 so that on systems where
+// monotonic time resolution is fairly low (e.g. Windows 2008
+// which appears to have a default resolution of 15ms),
+// we avoid ever reporting a nanotime of 0.
+// (Callers may want to use 0 as "time not set".)
+var startNano int64 = nanotime() - 1

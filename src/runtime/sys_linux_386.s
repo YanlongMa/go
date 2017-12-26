@@ -67,12 +67,24 @@ TEXT runtime·exit(SB),NOSPLIT,$0
 	INT $3	// not reached
 	RET
 
-TEXT runtime·exit1(SB),NOSPLIT,$0
+TEXT exit1<>(SB),NOSPLIT,$0
 	MOVL	$SYS_exit, AX
 	MOVL	code+0(FP), BX
 	INVOKE_SYSCALL
 	INT $3	// not reached
 	RET
+
+// func exitThread(wait *uint32)
+TEXT runtime·exitThread(SB),NOSPLIT,$0-4
+	MOVL	wait+0(FP), AX
+	// We're done using the stack.
+	MOVL	$0, (AX)
+	MOVL	$1, AX	// exit (just this thread)
+	MOVL	$0, BX	// exit code
+	INT	$0x80	// no stack; must not use CALL
+	// We may not even have a stack any more.
+	INT	$3
+	JMP	0(PC)
 
 TEXT runtime·open(SB),NOSPLIT,$0
 	MOVL	$SYS_open, AX
@@ -191,14 +203,55 @@ TEXT runtime·mincore(SB),NOSPLIT,$0-16
 	RET
 
 // func walltime() (sec int64, nsec int32)
-TEXT runtime·walltime(SB), NOSPLIT, $32
+TEXT runtime·walltime(SB), NOSPLIT, $0-12
+	// We don't know how much stack space the VDSO code will need,
+	// so switch to g0.
+
+	MOVL	SP, BP	// Save old SP; BP unchanged by C code.
+
+	get_tls(CX)
+	MOVL	g(CX), AX
+	MOVL	g_m(AX), CX
+	MOVL	m_curg(CX), DX
+
+	CMPL	AX, DX		// Only switch if on curg.
+	JNE	noswitch
+
+	MOVL	m_g0(CX), DX
+	MOVL	(g_sched+gobuf_sp)(DX), SP	// Set SP to g0 stack
+
+noswitch:
+	SUBL	$16, SP		// Space for results
+	ANDL	$~15, SP	// Align for C code
+
+	// Stack layout, depending on call path:
+	//  x(SP)   vDSO            INVOKE_SYSCALL
+	//    12    ts.tv_nsec      ts.tv_nsec
+	//     8    ts.tv_sec       ts.tv_sec
+	//     4    &ts             -
+	//     0    CLOCK_<id>      -
+
+	MOVL	runtime·__vdso_clock_gettime_sym(SB), AX
+	CMPL	AX, $0
+	JEQ	fallback
+
+	LEAL	8(SP), BX	// &ts (struct timespec)
+	MOVL	BX, 4(SP)
+	MOVL	$0, 0(SP)	// CLOCK_REALTIME
+	CALL	AX
+	JMP finish
+
+fallback:
 	MOVL	$SYS_clock_gettime, AX
 	MOVL	$0, BX		// CLOCK_REALTIME
 	LEAL	8(SP), CX
-	MOVL	$0, DX
 	INVOKE_SYSCALL
+
+finish:
 	MOVL	8(SP), AX	// sec
 	MOVL	12(SP), BX	// nsec
+
+	MOVL	BP, SP		// Restore real SP
 
 	// sec is in AX, nsec in BX
 	MOVL	AX, sec_lo+0(FP)
@@ -208,14 +261,47 @@ TEXT runtime·walltime(SB), NOSPLIT, $32
 
 // int64 nanotime(void) so really
 // void nanotime(int64 *nsec)
-TEXT runtime·nanotime(SB), NOSPLIT, $32
+TEXT runtime·nanotime(SB), NOSPLIT, $0-8
+	// Switch to g0 stack. See comment above in runtime·walltime.
+
+	MOVL	SP, BP	// Save old SP; BP unchanged by C code.
+
+	get_tls(CX)
+	MOVL	g(CX), AX
+	MOVL	g_m(AX), CX
+	MOVL	m_curg(CX), DX
+
+	CMPL	AX, DX		// Only switch if on curg.
+	JNE	noswitch
+
+	MOVL	m_g0(CX), DX
+	MOVL	(g_sched+gobuf_sp)(DX), SP	// Set SP to g0 stack
+
+noswitch:
+	SUBL	$16, SP		// Space for results
+	ANDL	$~15, SP	// Align for C code
+
+	MOVL	runtime·__vdso_clock_gettime_sym(SB), AX
+	CMPL	AX, $0
+	JEQ	fallback
+
+	LEAL	8(SP), BX	// &ts (struct timespec)
+	MOVL	BX, 4(SP)
+	MOVL	$1, 0(SP)	// CLOCK_MONOTONIC
+	CALL	AX
+	JMP finish
+
+fallback:
 	MOVL	$SYS_clock_gettime, AX
 	MOVL	$1, BX		// CLOCK_MONOTONIC
 	LEAL	8(SP), CX
-	MOVL	$0, DX
 	INVOKE_SYSCALL
+
+finish:
 	MOVL	8(SP), AX	// sec
 	MOVL	12(SP), BX	// nsec
+
+	MOVL	BP, SP		// Restore real SP
 
 	// sec is in AX, nsec in BX
 	// convert to DX:AX nsec
@@ -312,10 +398,15 @@ TEXT runtime·mmap(SB),NOSPLIT,$0
 	SHRL	$12, BP
 	INVOKE_SYSCALL
 	CMPL	AX, $0xfffff001
-	JLS	3(PC)
+	JLS	ok
 	NOTL	AX
 	INCL	AX
-	MOVL	AX, ret+24(FP)
+	MOVL	$0, p+24(FP)
+	MOVL	AX, err+28(FP)
+	RET
+ok:
+	MOVL	AX, p+24(FP)
+	MOVL	$0, err+28(FP)
 	RET
 
 TEXT runtime·munmap(SB),NOSPLIT,$0
@@ -432,7 +523,7 @@ TEXT runtime·clone(SB),NOSPLIT,$0
 
 nog:
 	CALL	SI	// fn()
-	CALL	runtime·exit1(SB)
+	CALL	exit1<>(SB)
 	MOVL	$0x1234, 0x1005
 
 TEXT runtime·sigaltstack(SB),NOSPLIT,$-8

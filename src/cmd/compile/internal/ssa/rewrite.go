@@ -117,10 +117,6 @@ func isSigned(t *types.Type) bool {
 	return t.IsSigned()
 }
 
-func typeSize(t *types.Type) int64 {
-	return t.Size()
-}
-
 // mergeSym merges two symbolic offsets. There is no real merging of
 // offsets, we just pick the non-nil one.
 func mergeSym(x, y interface{}) interface{} {
@@ -276,18 +272,6 @@ search:
 	return true
 }
 
-// isArg returns whether s is an arg symbol
-func isArg(s interface{}) bool {
-	_, ok := s.(*ArgSymbol)
-	return ok
-}
-
-// isAuto returns whether s is an auto symbol
-func isAuto(s interface{}) bool {
-	_, ok := s.(*AutoSymbol)
-	return ok
-}
-
 // isSameSym returns whether sym is the same as the given named symbol
 func isSameSym(sym interface{}, name string) bool {
 	s, ok := sym.(fmt.Stringer)
@@ -412,11 +396,11 @@ func uaddOvf(a, b int64) bool {
 // 'sym' is the symbol for the itab
 func devirt(v *Value, sym interface{}, offset int64) *obj.LSym {
 	f := v.Block.Func
-	ext, ok := sym.(*ExternSymbol)
+	n, ok := sym.(*obj.LSym)
 	if !ok {
 		return nil
 	}
-	lsym := f.fe.DerefItab(ext.Sym, offset)
+	lsym := f.fe.DerefItab(n, offset)
 	if f.pass.debug > 0 {
 		if lsym != nil {
 			f.Warnl(v.Pos, "de-virtualizing call")
@@ -677,6 +661,21 @@ func zeroUpper32Bits(x *Value, depth int) bool {
 		}
 		return true
 
+	}
+	return false
+}
+
+// inlineablememmovesize reports whether the given arch performs OpMove of the given size
+// faster than memmove and in a safe way when src and dst overlap.
+// This is used as a check for replacing memmove with OpMove.
+func isInlinableMemmoveSize(sz int64, c *Config) bool {
+	switch c.arch {
+	case "amd64", "amd64p32":
+		return sz <= 16
+	case "386", "ppc64", "s390x", "ppc64le":
+		return sz <= 8
+	case "arm", "mips", "mips64", "mipsle", "mips64le":
+		return sz <= 4
 	}
 	return false
 }

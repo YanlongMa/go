@@ -421,6 +421,9 @@ var optab = []Optab{
 	/* Vector permute */
 	{AVPERM, C_VREG, C_VREG, C_VREG, C_VREG, 83, 4, 0}, /* vector permute, va-form */
 
+	/* Vector bit permute */
+	{AVBPERMQ, C_VREG, C_VREG, C_NONE, C_VREG, 82, 4, 0}, /* vector bit permute, vx-form */
+
 	/* Vector select */
 	{AVSEL, C_VREG, C_VREG, C_VREG, C_VREG, 83, 4, 0}, /* vector select, va-form */
 
@@ -546,7 +549,9 @@ var optab = []Optab{
 	{ATW, C_LCON, C_REG, C_NONE, C_REG, 60, 4, 0},
 	{ATW, C_LCON, C_REG, C_NONE, C_ADDCON, 61, 4, 0},
 	{ADCBF, C_ZOREG, C_NONE, C_NONE, C_NONE, 43, 4, 0},
-	{ADCBF, C_ZOREG, C_REG, C_NONE, C_NONE, 43, 4, 0},
+	{ADCBF, C_SOREG, C_NONE, C_NONE, C_NONE, 43, 4, 0},
+	{ADCBF, C_ZOREG, C_REG, C_NONE, C_SCON, 43, 4, 0},
+	{ADCBF, C_SOREG, C_NONE, C_NONE, C_SCON, 43, 4, 0},
 	{AECOWX, C_REG, C_REG, C_NONE, C_ZOREG, 44, 4, 0},
 	{AECIWX, C_ZOREG, C_REG, C_NONE, C_REG, 45, 4, 0},
 	{AECOWX, C_REG, C_NONE, C_NONE, C_ZOREG, 44, 4, 0},
@@ -900,11 +905,11 @@ func (c *ctxt9) oplook(p *obj.Prog) *Optab {
 
 	a1--
 	a3 := C_NONE + 1
-	if p.From3 != nil {
-		a3 = int(p.From3.Class)
+	if p.GetFrom3() != nil {
+		a3 = int(p.GetFrom3().Class)
 		if a3 == 0 {
-			a3 = c.aclass(p.From3) + 1
-			p.From3.Class = int8(a3)
+			a3 = c.aclass(p.GetFrom3()) + 1
+			p.GetFrom3().Class = int8(a3)
 		}
 	}
 
@@ -1376,6 +1381,9 @@ func buildop(ctxt *obj.Link) {
 		case AVPERM: /* vperm */
 			opset(AVPERM, r0)
 
+		case AVBPERMQ: /* vbpermq, vbpermd */
+			opset(AVBPERMD, r0)
+
 		case AVSEL: /* vsel */
 			opset(AVSEL, r0)
 
@@ -1596,6 +1604,8 @@ func buildop(ctxt *obj.Link) {
 			opset(AFCFIDCC, r0)
 			opset(AFCFIDU, r0)
 			opset(AFCFIDUCC, r0)
+			opset(AFCFIDS, r0)
+			opset(AFCFIDSCC, r0)
 			opset(AFRES, r0)
 			opset(AFRESCC, r0)
 			opset(AFRIM, r0)
@@ -1615,6 +1625,8 @@ func buildop(ctxt *obj.Link) {
 			opset(AFADDS, r0)
 			opset(AFADDCC, r0)
 			opset(AFADDSCC, r0)
+			opset(AFCPSGN, r0)
+			opset(AFCPSGNCC, r0)
 			opset(AFDIV, r0)
 			opset(AFDIVS, r0)
 			opset(AFDIVCC, r0)
@@ -2459,7 +2471,7 @@ func (c *ctxt9) asmout(p *obj.Prog, o *Optab, out []uint32) {
 		if r == 0 {
 			r = int(p.To.Reg)
 		}
-		d := c.vregoff(p.From3)
+		d := c.vregoff(p.GetFrom3())
 		var a int
 		switch p.As {
 
@@ -2712,7 +2724,7 @@ func (c *ctxt9) asmout(p *obj.Prog, o *Optab, out []uint32) {
 		o2 = AOP_IRR(OP_ADDI, uint32(p.To.Reg), REGTMP, uint32(v))
 
 	case 27: /* subc ra,$simm,rd => subfic rd,ra,$simm */
-		v := c.regoff(p.From3)
+		v := c.regoff(p.GetFrom3())
 
 		r := int(p.From.Reg)
 		o1 = AOP_IRR(c.opirr(p.As), uint32(p.To.Reg), uint32(r), uint32(v))
@@ -2721,7 +2733,7 @@ func (c *ctxt9) asmout(p *obj.Prog, o *Optab, out []uint32) {
 		if p.To.Reg == REGTMP || p.From.Reg == REGTMP {
 			c.ctxt.Diag("can't synthesize large constant\n%v", p)
 		}
-		v := c.regoff(p.From3)
+		v := c.regoff(p.GetFrom3())
 		o1 = AOP_IRR(OP_ADDIS, REGTMP, REGZERO, uint32(v)>>16)
 		o2 = LOP_IRR(OP_ORI, REGTMP, REGTMP, uint32(v))
 		o3 = AOP_RRR(c.oprrr(p.As), uint32(p.To.Reg), uint32(p.From.Reg), REGTMP)
@@ -2734,7 +2746,7 @@ func (c *ctxt9) asmout(p *obj.Prog, o *Optab, out []uint32) {
 	case 29: /* rldic[lr]? $sh,s,$mask,a -- left, right, plain give different masks */
 		v := c.regoff(&p.From)
 
-		d := c.vregoff(p.From3)
+		d := c.vregoff(p.GetFrom3())
 		var mask [2]uint8
 		c.maskgen64(p, mask[:], uint64(d))
 		var a int
@@ -2774,7 +2786,7 @@ func (c *ctxt9) asmout(p *obj.Prog, o *Optab, out []uint32) {
 	case 30: /* rldimi $sh,s,$mask,a */
 		v := c.regoff(&p.From)
 
-		d := c.vregoff(p.From3)
+		d := c.vregoff(p.GetFrom3())
 
 		// Original opcodes had mask operands which had to be converted to a shift count as expected by
 		// the ppc64 asm.
@@ -2845,7 +2857,7 @@ func (c *ctxt9) asmout(p *obj.Prog, o *Optab, out []uint32) {
 		o1 = AOP_RRR(c.oprrr(p.As), uint32(p.To.Reg), 0, uint32(r))
 
 	case 34: /* FMADDx fra,frb,frc,frt (t=a*c±b) */
-		o1 = AOP_RRR(c.oprrr(p.As), uint32(p.To.Reg), uint32(p.From.Reg), uint32(p.Reg)) | (uint32(p.From3.Reg)&31)<<6
+		o1 = AOP_RRR(c.oprrr(p.As), uint32(p.To.Reg), uint32(p.From.Reg), uint32(p.Reg)) | (uint32(p.GetFrom3().Reg)&31)<<6
 
 	case 35: /* mov r,lext/lauto/loreg ==> cau $(v>>16),sb,r'; store o(r') */
 		v := c.regoff(&p.To)
@@ -2887,13 +2899,28 @@ func (c *ctxt9) asmout(p *obj.Prog, o *Optab, out []uint32) {
 		o1 = uint32(c.regoff(&p.From))
 
 	case 41: /* stswi */
-		o1 = AOP_RRR(c.opirr(p.As), uint32(p.From.Reg), uint32(p.To.Reg), 0) | (uint32(c.regoff(p.From3))&0x7F)<<11
+		o1 = AOP_RRR(c.opirr(p.As), uint32(p.From.Reg), uint32(p.To.Reg), 0) | (uint32(c.regoff(p.GetFrom3()))&0x7F)<<11
 
 	case 42: /* lswi */
-		o1 = AOP_RRR(c.opirr(p.As), uint32(p.To.Reg), uint32(p.From.Reg), 0) | (uint32(c.regoff(p.From3))&0x7F)<<11
+		o1 = AOP_RRR(c.opirr(p.As), uint32(p.To.Reg), uint32(p.From.Reg), 0) | (uint32(c.regoff(p.GetFrom3()))&0x7F)<<11
 
-	case 43: /* unary indexed source: dcbf (b); dcbf (a+b) */
-		o1 = AOP_RRR(c.oprrr(p.As), 0, uint32(p.From.Index), uint32(p.From.Reg))
+	case 43: /* data cache instructions: op (Ra+[Rb]), [th|l] */
+		/* TH field for dcbt/dcbtst: */
+		/* 0 = Block access - program will soon access EA. */
+		/* 8-15 = Stream access - sequence of access (data stream). See section 4.3.2 of the ISA for details. */
+		/* 16 = Block access - program will soon make a transient access to EA. */
+		/* 17 = Block access - program will not access EA for a long time. */
+
+		/* L field for dcbf: */
+		/* 0 = invalidates the block containing EA in all processors. */
+		/* 1 = same as 0, but with limited scope (i.e. block in the current processor will not be reused soon). */
+		/* 3 = same as 1, but with even more limited scope (i.e. block in the current processor primary cache will not be reused soon). */
+		if p.To.Type == obj.TYPE_NONE {
+			o1 = AOP_RRR(c.oprrr(p.As), 0, uint32(p.From.Index), uint32(p.From.Reg))
+		} else {
+			th := c.regoff(&p.To)
+			o1 = AOP_RRR(c.oprrr(p.As), uint32(th), uint32(p.From.Index), uint32(p.From.Reg))
+		}
 
 	case 44: /* indexed store */
 		o1 = AOP_RRR(c.opstorex(p.As), uint32(p.From.Reg), uint32(p.To.Index), uint32(p.To.Reg))
@@ -3060,13 +3087,13 @@ func (c *ctxt9) asmout(p *obj.Prog, o *Optab, out []uint32) {
 		v := c.regoff(&p.From)
 
 		var mask [2]uint8
-		c.maskgen(p, mask[:], uint32(c.regoff(p.From3)))
+		c.maskgen(p, mask[:], uint32(c.regoff(p.GetFrom3())))
 		o1 = AOP_RRR(c.opirr(p.As), uint32(p.Reg), uint32(p.To.Reg), uint32(v))
 		o1 |= (uint32(mask[0])&31)<<6 | (uint32(mask[1])&31)<<1
 
 	case 63: /* rlwmi b,s,$mask,a */
 		var mask [2]uint8
-		c.maskgen(p, mask[:], uint32(c.regoff(p.From3)))
+		c.maskgen(p, mask[:], uint32(c.regoff(p.GetFrom3())))
 
 		o1 = AOP_RRR(c.opirr(p.As), uint32(p.Reg), uint32(p.To.Reg), uint32(p.From.Reg))
 		o1 |= (uint32(mask[0])&31)<<6 | (uint32(mask[1])&31)<<1
@@ -3074,7 +3101,7 @@ func (c *ctxt9) asmout(p *obj.Prog, o *Optab, out []uint32) {
 	case 64: /* mtfsf fr[, $m] {,fpcsr} */
 		var v int32
 		if p.From3Type() != obj.TYPE_NONE {
-			v = c.regoff(p.From3) & 255
+			v = c.regoff(p.GetFrom3()) & 255
 		} else {
 			v = 255
 		}
@@ -3129,7 +3156,7 @@ func (c *ctxt9) asmout(p *obj.Prog, o *Optab, out []uint32) {
 			if p.To.Reg != 0 {
 				c.ctxt.Diag("can't use both mask and CR(n)\n%v", p)
 			}
-			v = c.regoff(p.From3) & 0xff
+			v = c.regoff(p.GetFrom3()) & 0xff
 		} else {
 			if p.To.Reg == 0 {
 				v = 0xff /* CR */
@@ -3268,7 +3295,7 @@ func (c *ctxt9) asmout(p *obj.Prog, o *Optab, out []uint32) {
 			/* imm imm reg reg */
 			/* operand order: SIX, VRA, ST, VRT */
 			six := int(c.regoff(&p.From))
-			st := int(c.regoff(p.From3))
+			st := int(c.regoff(p.GetFrom3()))
 			o1 = AOP_IIRR(c.opiirr(p.As), uint32(p.To.Reg), uint32(p.Reg), uint32(st), uint32(six))
 		} else if p.From3Type() == obj.TYPE_NONE && p.Reg != 0 {
 			/* imm reg reg */
@@ -3286,19 +3313,19 @@ func (c *ctxt9) asmout(p *obj.Prog, o *Optab, out []uint32) {
 		if p.From.Type == obj.TYPE_REG {
 			/* reg reg reg reg */
 			/* 4-register operand order: VRA, VRB, VRC, VRT */
-			o1 = AOP_RRRR(c.oprrr(p.As), uint32(p.To.Reg), uint32(p.From.Reg), uint32(p.Reg), uint32(p.From3.Reg))
+			o1 = AOP_RRRR(c.oprrr(p.As), uint32(p.To.Reg), uint32(p.From.Reg), uint32(p.Reg), uint32(p.GetFrom3().Reg))
 		} else if p.From.Type == obj.TYPE_CONST {
 			/* imm reg reg reg */
 			/* operand order: SHB, VRA, VRB, VRT */
 			shb := int(c.regoff(&p.From))
-			o1 = AOP_IRRR(c.opirrr(p.As), uint32(p.To.Reg), uint32(p.Reg), uint32(p.From3.Reg), uint32(shb))
+			o1 = AOP_IRRR(c.opirrr(p.As), uint32(p.To.Reg), uint32(p.Reg), uint32(p.GetFrom3().Reg), uint32(shb))
 		}
 
 	case 84: // ISEL BC,RA,RB,RT -> isel rt,ra,rb,bc
 		bc := c.vregoff(&p.From)
 
 		// rt = To.Reg, ra = p.Reg, rb = p.From3.Reg
-		o1 = AOP_ISEL(OP_ISEL, uint32(p.To.Reg), uint32(p.Reg), uint32(p.From3.Reg), uint32(bc))
+		o1 = AOP_ISEL(OP_ISEL, uint32(p.To.Reg), uint32(p.Reg), uint32(p.GetFrom3().Reg), uint32(bc))
 
 	case 85: /* vector instructions, VX-form */
 		/* reg none reg */
@@ -3346,7 +3373,7 @@ func (c *ctxt9) asmout(p *obj.Prog, o *Optab, out []uint32) {
 	case 89: /* VSX instructions, XX2-form */
 		/* reg none reg OR reg imm reg */
 		/* 2-register operand order: XB, XT or XB, UIM, XT*/
-		uim := int(c.regoff(p.From3))
+		uim := int(c.regoff(p.GetFrom3()))
 		o1 = AOP_XX2(c.oprrr(p.As), uint32(p.To.Reg), uint32(uim), uint32(p.From.Reg))
 
 	case 90: /* VSX instructions, XX3-form */
@@ -3357,14 +3384,14 @@ func (c *ctxt9) asmout(p *obj.Prog, o *Optab, out []uint32) {
 		} else if p.From3Type() == obj.TYPE_CONST {
 			/* reg reg reg imm */
 			/* operand order: XA, XB, DM, XT */
-			dm := int(c.regoff(p.From3))
+			dm := int(c.regoff(p.GetFrom3()))
 			o1 = AOP_XX3I(c.oprrr(p.As), uint32(p.To.Reg), uint32(p.From.Reg), uint32(p.Reg), uint32(dm))
 		}
 
 	case 91: /* VSX instructions, XX4-form */
 		/* reg reg reg reg */
 		/* 3-register operand order: XA, XB, XC, XT */
-		o1 = AOP_XX4(c.oprrr(p.As), uint32(p.To.Reg), uint32(p.From.Reg), uint32(p.Reg), uint32(p.From3.Reg))
+		o1 = AOP_XX4(c.oprrr(p.As), uint32(p.To.Reg), uint32(p.From.Reg), uint32(p.Reg), uint32(p.GetFrom3().Reg))
 
 	case 92: /* X-form instructions, 3-operands */
 		if p.To.Type == obj.TYPE_CONST {
@@ -3382,7 +3409,7 @@ func (c *ctxt9) asmout(p *obj.Prog, o *Optab, out []uint32) {
 		} else if p.From3Type() == obj.TYPE_CONST {
 			/* reg reg imm */
 			/* operand order: RB, L, RA */
-			l := int(c.regoff(p.From3))
+			l := int(c.regoff(p.GetFrom3()))
 			o1 = AOP_RRR(c.opirr(p.As), uint32(l), uint32(p.To.Reg), uint32(p.From.Reg))
 		} else if p.To.Type == obj.TYPE_REG {
 			cr := int32(p.To.Reg)
@@ -3423,7 +3450,7 @@ func (c *ctxt9) asmout(p *obj.Prog, o *Optab, out []uint32) {
 	case 94: /* Z23-form instructions, 4-operands */
 		/* reg reg reg imm */
 		/* operand order: RA, RB, CY, RT */
-		cy := int(c.regoff(p.From3))
+		cy := int(c.regoff(p.GetFrom3()))
 		o1 = AOP_Z23I(c.oprrr(p.As), uint32(p.To.Reg), uint32(p.From.Reg), uint32(p.Reg), uint32(cy))
 	}
 
@@ -3656,6 +3683,10 @@ func (c *ctxt9) oprrr(a obj.As) uint32 {
 		return OPVCC(63, 974, 0, 0)
 	case AFCFIDUCC:
 		return OPVCC(63, 974, 0, 1)
+	case AFCFIDS:
+		return OPVCC(59, 846, 0, 0)
+	case AFCFIDSCC:
+		return OPVCC(59, 846, 0, 1)
 	case AFCTIW:
 		return OPVCC(63, 14, 0, 0)
 	case AFCTIWCC:
@@ -3733,6 +3764,10 @@ func (c *ctxt9) oprrr(a obj.As) uint32 {
 		return OPVCC(59, 30, 0, 0)
 	case AFNMSUBSCC:
 		return OPVCC(59, 30, 0, 1)
+	case AFCPSGN:
+		return OPVCC(63, 8, 0, 0)
+	case AFCPSGNCC:
+		return OPVCC(63, 8, 0, 1)
 	case AFRES:
 		return OPVCC(59, 24, 0, 0)
 	case AFRESCC:
@@ -4136,6 +4171,11 @@ func (c *ctxt9) oprrr(a obj.As) uint32 {
 		return OPVX(4, 900, 0, 0) /* vsraw - v2.03 */
 	case AVSRAD:
 		return OPVX(4, 964, 0, 0) /* vsrad - v2.07 */
+
+	case AVBPERMQ:
+		return OPVC(4, 1356, 0, 0) /* vbpermq - v2.07 */
+	case AVBPERMD:
+		return OPVC(4, 1484, 0, 0) /* vbpermd - v3.00 */
 
 	case AVCLZB:
 		return OPVX(4, 1794, 0, 0) /* vclzb - v2.07 */

@@ -5,9 +5,13 @@
 package gc
 
 import (
-	"bytes"
+	"bufio"
 	"internal/testenv"
+	"io"
 	"os/exec"
+	"regexp"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -25,19 +29,83 @@ func TestIntendedInlining(t *testing.T) {
 	// be inlined.
 	want := map[string][]string{
 		"runtime": {
-			"tophash",
-			"add",
-			"addb",
-			"subtractb",
-			"(*bmap).keys",
-			"bucketShift",
-			"bucketMask",
-			"fastrand",
-			"noescape",
+			// TODO(mvdan): enable these once mid-stack
+			// inlining is available
+			// "adjustctxt",
 
-			// TODO: These were modified at some point to be
-			// made inlineable, but have since been broken.
-			// "nextFreeFast",
+			"add",
+			"acquirem",
+			"add1",
+			"addb",
+			"adjustpanics",
+			"adjustpointer",
+			"bucketMask",
+			"bucketShift",
+			"chanbuf",
+			"deferArgs",
+			"deferclass",
+			"evacuated",
+			"fastlog2",
+			"fastrand",
+			"float64bits",
+			"funcPC",
+			"getm",
+			"isDirectIface",
+			"itabHashFunc",
+			"maxSliceCap",
+			"noescape",
+			"readUnaligned32",
+			"readUnaligned64",
+			"releasem",
+			"round",
+			"roundupsize",
+			"selectsize",
+			"stringStructOf",
+			"subtract1",
+			"subtractb",
+			"tophash",
+			"totaldefersize",
+			"(*bmap).keys",
+			"(*bmap).overflow",
+			"(*waitq).enqueue",
+
+			// GC-related ones
+			"cgoInRange",
+			"gclinkptr.ptr",
+			"guintptr.ptr",
+			"heapBits.bits",
+			"heapBits.isPointer",
+			"heapBits.morePointers",
+			"heapBits.next",
+			"heapBitsForAddr",
+			"inheap",
+			"markBits.isMarked",
+			"muintptr.ptr",
+			"puintptr.ptr",
+			"spanOfUnchecked",
+			"(*gcWork).putFast",
+			"(*gcWork).tryGetFast",
+			"(*guintptr).set",
+			"(*markBits).advance",
+			"(*mspan).allocBitsForIndex",
+			"(*mspan).base",
+			"(*mspan).markBitsForBase",
+			"(*mspan).markBitsForIndex",
+			"(*muintptr).set",
+			"(*puintptr).set",
+		},
+		"runtime/internal/sys": {},
+		"bytes": {
+			"(*Buffer).Bytes",
+			"(*Buffer).Cap",
+			"(*Buffer).Len",
+			"(*Buffer).Next",
+			"(*Buffer).Read",
+			"(*Buffer).ReadByte",
+			"(*Buffer).Reset",
+			"(*Buffer).String",
+			"(*Buffer).UnreadByte",
+			"(*Buffer).tryGrowByReslice",
 		},
 		"unicode/utf8": {
 			"FullRune",
@@ -45,39 +113,103 @@ func TestIntendedInlining(t *testing.T) {
 			"RuneLen",
 			"ValidRune",
 		},
+		"reflect": {
+			"Value.CanAddr",
+			"Value.CanSet",
+			"Value.IsValid",
+			"add",
+			"align",
+			"flag.kind",
+			"flag.ro",
+
+			// TODO: these use panic, need mid-stack
+			// inlining
+			// "Value.CanInterface",
+			// "Value.pointer",
+			// "flag.mustBe",
+			// "flag.mustBeAssignable",
+			// "flag.mustBeExported",
+		},
+		"regexp": {
+			"(*bitState).push",
+		},
 	}
 
-	m := make(map[string]bool)
+	if runtime.GOARCH != "386" && runtime.GOARCH != "mips64" && runtime.GOARCH != "mips64le" {
+		// nextFreeFast calls sys.Ctz64, which on 386 is implemented in asm and is not inlinable.
+		// We currently don't have midstack inlining so nextFreeFast is also not inlinable on 386.
+		// On MIPS64x, Ctz64 is not intrinsified and causes nextFreeFast too expensive to inline
+		// (Issue 22239).
+		want["runtime"] = append(want["runtime"], "nextFreeFast")
+	}
+	if runtime.GOARCH != "386" {
+		// As explained above, Ctz64 and Ctz32 are not Go code on 386.
+		// The same applies to Bswap32.
+		want["runtime/internal/sys"] = append(want["runtime/internal/sys"], "Ctz64")
+		want["runtime/internal/sys"] = append(want["runtime/internal/sys"], "Ctz32")
+		want["runtime/internal/sys"] = append(want["runtime/internal/sys"], "Bswap32")
+	}
+	switch runtime.GOARCH {
+	case "amd64", "amd64p32", "arm64", "mips64", "mips64le", "ppc64", "ppc64le", "s390x":
+		// rotl_31 is only defined on 64-bit architectures
+		want["runtime"] = append(want["runtime"], "rotl_31")
+	}
+
+	notInlinedReason := make(map[string]string)
 	pkgs := make([]string, 0, len(want))
 	for pname, fnames := range want {
 		pkgs = append(pkgs, pname)
 		for _, fname := range fnames {
-			m[pname+"."+fname] = true
+			fullName := pname + "." + fname
+			if _, ok := notInlinedReason[fullName]; ok {
+				t.Errorf("duplicate func: %s", fullName)
+			}
+			notInlinedReason[fullName] = "unknown reason"
 		}
 	}
 
-	args := append([]string{"build", "-a", "-gcflags=-m"}, pkgs...)
+	args := append([]string{"build", "-a", "-gcflags=all=-m -m"}, pkgs...)
 	cmd := testenv.CleanCmdEnv(exec.Command(testenv.GoToolPath(t), args...))
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Logf("%s", out)
-		t.Fatal(err)
-	}
-	lines := bytes.Split(out, []byte{'\n'})
+	pr, pw := io.Pipe()
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+	cmdErr := make(chan error, 1)
+	go func() {
+		cmdErr <- cmd.Run()
+		pw.Close()
+	}()
+	scanner := bufio.NewScanner(pr)
 	curPkg := ""
-	for _, l := range lines {
-		if bytes.HasPrefix(l, []byte("# ")) {
-			curPkg = string(l[2:])
-		}
-		f := bytes.Split(l, []byte(": can inline "))
-		if len(f) < 2 {
+	canInline := regexp.MustCompile(`: can inline ([^ ]*)`)
+	cannotInline := regexp.MustCompile(`: cannot inline ([^ ]*): (.*)`)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "# ") {
+			curPkg = line[2:]
 			continue
 		}
-		fn := bytes.TrimSpace(f[1])
-		delete(m, curPkg+"."+string(fn))
+		if m := canInline.FindStringSubmatch(line); m != nil {
+			fname := m[1]
+			delete(notInlinedReason, curPkg+"."+fname)
+			continue
+		}
+		if m := cannotInline.FindStringSubmatch(line); m != nil {
+			fname, reason := m[1], m[2]
+			fullName := curPkg + "." + fname
+			if _, ok := notInlinedReason[fullName]; ok {
+				// cmd/compile gave us a reason why
+				notInlinedReason[fullName] = reason
+			}
+			continue
+		}
 	}
-
-	for s := range m {
-		t.Errorf("function %s not inlined", s)
+	if err := <-cmdErr; err != nil {
+		t.Fatal(err)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for fullName, reason := range notInlinedReason {
+		t.Errorf("%s was not inlined: %s", fullName, reason)
 	}
 }

@@ -550,6 +550,14 @@ label1:
 //	ftsqrt	BF, FRB
 	FTSQRT	F2,$7
 
+//	FCFID	
+//	FCFIDS
+
+	FCFID	F2,F3
+	FCFIDCC	F3,F3
+	FCFIDS	F2,F3
+	FCFIDSCC F2,F3
+
 //
 // CMP
 //
@@ -710,6 +718,10 @@ label1:
 //	}
 	DCBF	(R1)
 	DCBF	(R1+R2) // DCBF	(R1)(R2*1)
+	DCBF	(R1), $1
+	DCBF	(R1)(R2*1), $1
+	DCBT	(R1), $1
+	DCBT	(R1)(R2*1), $1
 
 //	LDMX  (RB)(RA*1),RT produces
 //	ldmx  RT,RA,RB
@@ -721,6 +733,9 @@ label1:
 	POPCNTD	R1,R2
 	POPCNTW	R1,R2
 	POPCNTB R1,R2
+
+//	Copysign
+	FCPSGN F1,F2,F3
 
 //	Random number generator, X-form
 //	DARN  L,RT produces
@@ -916,6 +931,12 @@ label1:
 //	<MNEMONIC> VRA,VRB,VRC,VRT produces
 //	<mnemonic> VRT,VRA,VRB,VRC
 	VPERM V3, V2, V1, V0
+
+//	Vector bit permute, VX-form
+//	<MNEMONIC> VRA,VRB,VRT produces
+//	<mnemonic> VRT,VRA,VRB
+	VBPERMQ	V3,V1,V2
+	VBPERMD	V3,V1,V2
 
 //	Vector select, VA-form
 //	<MNEMONIC> VRA,VRB,VRC,VRT produces

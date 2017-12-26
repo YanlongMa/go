@@ -377,7 +377,39 @@ func (rw *RWMutex) Unlock() {
 	rw.rw.unlock()
 }
 
-func MapBuckets(m map[int]int) int {
+func MapBucketsCount(m map[int]int) int {
 	h := *(**hmap)(unsafe.Pointer(&m))
 	return 1 << h.B
+}
+
+func MapBucketsPointerIsNil(m map[int]int) bool {
+	h := *(**hmap)(unsafe.Pointer(&m))
+	return h.buckets == nil
+}
+
+func LockOSCounts() (external, internal uint32) {
+	g := getg()
+	if g.m.lockedExt+g.m.lockedInt == 0 {
+		if g.lockedm != 0 {
+			panic("lockedm on non-locked goroutine")
+		}
+	} else {
+		if g.lockedm == 0 {
+			panic("nil lockedm on locked goroutine")
+		}
+	}
+	return g.m.lockedExt, g.m.lockedInt
+}
+
+//go:noinline
+func TracebackSystemstack(stk []uintptr, i int) int {
+	if i == 0 {
+		pc, sp := getcallerpc(), getcallersp(unsafe.Pointer(&stk))
+		return gentraceback(pc, sp, 0, getg(), 0, &stk[0], len(stk), nil, nil, _TraceJumpStack)
+	}
+	n := 0
+	systemstack(func() {
+		n = TracebackSystemstack(stk, i-1)
+	})
+	return n
 }

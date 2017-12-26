@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -251,7 +252,7 @@ func TestCgoCCodeSIGPROF(t *testing.T) {
 
 func TestCgoCrashTraceback(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+	if runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "ppc64le") {
 		t.Skipf("not yet supported on %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
 	got := runTestProg(t, "testprogcgo", "CrashTraceback")
@@ -273,7 +274,7 @@ func TestCgoTracebackContext(t *testing.T) {
 
 func testCgoPprof(t *testing.T, buildArg, runArg string) {
 	t.Parallel()
-	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+	if runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "ppc64le") {
 		t.Skipf("not yet supported on %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
 	testenv.MustHaveGoRun(t)
@@ -330,7 +331,7 @@ func TestCgoPprof(t *testing.T) {
 }
 
 func TestCgoPprofPIE(t *testing.T) {
-	testCgoPprof(t, "-ldflags=-extldflags=-pie", "CgoPprof")
+	testCgoPprof(t, "-buildmode=pie", "CgoPprof")
 }
 
 func TestCgoPprofThread(t *testing.T) {
@@ -441,5 +442,42 @@ func TestCatchPanic(t *testing.T) {
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Errorf("testprogcgo CgoCatchPanic failed: %v\n%s", err, out)
 		}
+	}
+}
+
+func TestCgoLockOSThreadExit(t *testing.T) {
+	switch runtime.GOOS {
+	case "plan9", "windows":
+		t.Skipf("no pthreads on %s", runtime.GOOS)
+	}
+	t.Parallel()
+	testLockOSThreadExit(t, "testprogcgo")
+}
+
+func TestWindowsStackMemoryCgo(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("skipping windows specific test")
+	}
+	testenv.SkipFlaky(t, 22575)
+	o := runTestProg(t, "testprogcgo", "StackMemory")
+	stackUsage, err := strconv.Atoi(o)
+	if err != nil {
+		t.Fatalf("Failed to read stack usage: %v", err)
+	}
+	if expected, got := 100<<10, stackUsage; got > expected {
+		t.Fatalf("expected < %d bytes of memory per thread, got %d", expected, got)
+	}
+}
+
+func TestSigStackSwapping(t *testing.T) {
+	switch runtime.GOOS {
+	case "plan9", "windows":
+		t.Skipf("no sigaltstack on %s", runtime.GOOS)
+	}
+	t.Parallel()
+	got := runTestProg(t, "testprogcgo", "SigStack")
+	want := "OK\n"
+	if got != want {
+		t.Errorf("expected %q got %v", want, got)
 	}
 }
